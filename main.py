@@ -24,12 +24,17 @@ class LeaderboardBot(commands.Bot):
         # Dictionary to store guild configuration {guild_id: {channel_id, role_id, top, from_channel_id}}
         # NOTE: This data is NOT persistent and will be lost on bot restart.
         self.leaderboard_config = {}
-        self.weekly_leaderboard_task.start()
+        # REMOVED: self.weekly_leaderboard_task.start()
+        # It will be started in setup_hook()
 
     async def setup_hook(self):
         # Sync slash commands with Discord
         await self.tree.sync()
         print("Slash commands synced!")
+        
+        # FIX: Start the task here, inside an async method, after the bot object is created.
+        self.weekly_leaderboard_task.start() 
+        print("Weekly leaderboard task started!")
 
     async def on_ready(self):
         print(f'Logged in as {self.user} (ID: {self.user.id})')
