@@ -64,7 +64,6 @@ class LeaderboardBot(commands.Bot):
         """Calculates the date and time of the next Sunday at 10:00 AM IST."""
         
         # 1. Localize the start time to IST
-        # Ensure start_time is UTC before localizing
         start_time_utc = start_time.astimezone(UTC_TZ)
         start_time_ist = start_time_utc.astimezone(IST_TZ)
         
@@ -111,10 +110,11 @@ class LeaderboardBot(commands.Bot):
     def _start_weekly_task_with_persistence(self):
         """
         Calculates the time until the first configured guild's next scheduled run 
-        and starts the task with that delay.
+        and starts the task with that delay and the hourly interval.
         """
         if not self.leaderboard_config:
             if not self.weekly_leaderboard_task.is_running():
+                 # Use a short interval if no setup yet
                  self.weekly_leaderboard_task.start(seconds=3600, delay=60) 
             return
 
@@ -134,6 +134,7 @@ class LeaderboardBot(commands.Bot):
         
         print(f"Calculated initial delay: {initial_delay / 3600:.2f} hours")
 
+        # FIX: Explicitly pass both seconds (the hourly check) and the calculated delay
         if not self.weekly_leaderboard_task.is_running():
             self.weekly_leaderboard_task.start(seconds=3600, delay=initial_delay)
         else:
@@ -232,7 +233,7 @@ class LeaderboardBot(commands.Bot):
         self._start_weekly_task_with_persistence() 
         return True
 
-    @tasks.loop(seconds=3600) # Runs every hour to check if the target time has passed
+    @tasks.loop() # FIX: Removed seconds=3600 here
     async def weekly_leaderboard_task(self):
         """The scheduled task that executes the leaderboard logic based on stored next run time."""
         await self.wait_until_ready()
