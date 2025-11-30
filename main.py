@@ -135,6 +135,7 @@ class LeaderboardBot(commands.Bot):
         print(f"Calculated initial delay: {initial_delay / 3600:.2f} hours")
 
         # FIX: Explicitly pass both seconds (the hourly check) and the calculated delay
+        # This is where the error was corrected in the previous step.
         if not self.weekly_leaderboard_task.is_running():
             self.weekly_leaderboard_task.start(seconds=3600, delay=initial_delay)
         else:
@@ -233,7 +234,7 @@ class LeaderboardBot(commands.Bot):
         self._start_weekly_task_with_persistence() 
         return True
 
-    @tasks.loop() # FIX: Removed seconds=3600 here
+    @tasks.loop() # FIX: Removed seconds=3600 here. This is why .start() can now take 'seconds' as an argument.
     async def weekly_leaderboard_task(self):
         """The scheduled task that executes the leaderboard logic based on stored next run time."""
         await self.wait_until_ready()
