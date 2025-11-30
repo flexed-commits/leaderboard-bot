@@ -251,7 +251,7 @@ class LeaderboardBot(commands.Bot):
         message_content = (
             f"Hello fellas, \n"
             f"We're back with the weekly leaderboard update!! <:Pika_Think:1444211873687011328>\n"
-            f"Here are the top {top_n} active members past week–\n"
+            f"Here are the top {top_n} active members past week:\n"
             f":first_place: Top 1: {u1} with more than {c1} messages. \n"
             f"-# Gets 50k unb in cash\n"
             f":second_place: Top 2: {u2} with more than {c2} messages.\n"
@@ -466,6 +466,18 @@ bot.tree.add_command(bot.cmd_test_leaderboard)
 bot.tree.add_command(bot.cmd_leaderboard_timer)
 
 # ----- Run the bot -----
+GUILD_ID = 1349281907765936188  # replace with your guild ID
+
+@bot.event
+async def on_ready():
+    try:
+        guild = discord.Object(id=GUILD_ID)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"Synced {len(synced)} guild commands.")
+    except Exception as e:
+        print(f"Error syncing commands: {e}")
+
+    print(f"Bot is ready! Logged in as {bot.user}.")
 if __name__ == "__main__":
     if not TOKEN:
         print("Error: DISCORD_TOKEN not found in environment. Please check your .env file.")
