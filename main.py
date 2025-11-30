@@ -1,41 +1,437 @@
 import discord
-from discord import app_commands
-from discord.ext import commands, tasks
-import datetime
-from collections import Counter
+from discord import app_commands, Intents, Client
+from datetime import datetime, timedelta, timezone
 import asyncio
 import os
-import json
-from dotenv import load_dotenv
-from datetime import datetime, timedelta
-import pytz # Used for named timezones - requires: pip install pytz
+import collections
 
-# --- CONFIGURATION ---
-load_dotenv()
-TOKEN = os.getenv('DISCORD_TOKEN')
+# --- Firestore Setup (using firebase_admin) ---
+# NOTE: In a real-world Python deployment, you MUST initialize the Firebase Admin SDK
+# with service account credentials (e.g., using firebase_admin.credentials.Certificate).
+# For this execution environment, we will mock the initialization.
+# In a true deployment, ensure 'firebase_admin' is installed and configured.
 
-# ----------------------------------------------------
-# DEBUGGING BLOCK START
-# ----------------------------------------------------
-if TOKEN:
-    # Print only the first few characters to confirm it loaded, but keep the full token secure
-    print(f"DEBUG: Token loaded successfully. Starts with: {TOKEN[:5]}...")
+try:
+    import firebase_admin
+    from firebase_admin import firestore, credentials
+    
+    # Placeholder for credentials/app ID that would be provided by the environment
+    # We assume the Firebase Admin SDK is initialized elsewhere or configured correctly
+    # for security rules access, as direct use of __firebase_config (JS object)
+    # is not standard for Python backend bots.
+    
+    # Initialize App (if not already initialized)
+    if not firebase_admin._apps:
+        # Assuming a default service account or environment config is present
+        # Replace with your actual initialization if running locally:
+        # cred = credentials.Certificate('path/to/your/serviceAccountKey.json')
+        # firebase_admin.initialize_app(cred)
+        # For demonstration purposes, we'll try default init if possible:
+        try:
+            firebase_admin.initialize_app()
+        except Exception as e:
+            # Fallback if auto-init fails (common in constrained envs)
+            print(f"Firebase auto-init failed. Please ensure credentials are set up. Error: {e}")
+            pass
+
+    db = firestore.client()
+    
+    # Use a dummy app ID if not provided by the environment
+    # This ensures we follow the required public data path structure
+    APP_ID = os.environ.get('APP_ID', 'default-bot-app-id') 
+    
+    # Firestore path for configuration following security rules: 
+    # /artifacts/{appId}/public/data/leaderboard_config/settings
+    CONFIG_REF_PATH = f'artifacts/{APP_ID}/public/data/leaderboard_config'
+    CONFIG_DOC_ID = 'settings'
+
+except ImportError:
+    print("Warning: firebase_admin not installed. Persistence will be disabled.")
+    # Create a dummy object to prevent runtime errors if persistence is unavailable
+    class MockFirestore:
+        def get(self): return collections.defaultdict(lambda: None)
+        def set(self, data): pass
+    class MockDB:
+        def collection(self, path): return self
+        def document(self, doc_id): return MockFirestore()
+    db = MockDB()
+    CONFIG_REF_PATH = ''
+    CONFIG_DOC_ID = ''
+
+# --- Bot Setup ---
+
+# Set your bot token here. Using an environment variable is best practice.
+TOKEN = os.environ.get('DISCORD_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE') 
+if TOKEN == 'YOUR_BOT_TOKEN_HERE':
+    print("WARNING: Please set the DISCORD_BOT_TOKEN environment variable or replace 'YOUR_BOT_TOKEN_HERE' with your actual bot token.")
+
+# Intents required:
+# - messages: For reading messages in the source channel.
+# - guilds: For guild operations (roles, members).
+# - members: MANDATORY for role assignment and reading all member data. Must be enabled in Discord Developer Portal.
+intents = Intents.default()
+intents.messages = True
+intents.message_content = True # Required for reading message content/activity
+intents.guilds = True
+intents.members = True # Ensure this is enabled in the Discord Developer Portal
+
+class LeaderboardClient(Client):
+    def __init__(self, *, intents: Intents):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+        self.config = None
+        self.db_doc_ref = db.collection(CONFIG_REF_PATH).document(CONFIG_DOC_ID)
+
+    async def on_ready(self):
+        await self.tree.sync()
+        print(f'Logged in as {self.user} (ID: {self.user.id})')
+        await self.load_config()
+        self.leaderboard_scheduler.start()
+
+    async def load_config(self):
+        """Loads configuration from Firestore."""
+        try:
+            doc = await asyncio.to_thread(self.db_doc_ref.get)
+            if doc.exists:
+                self.config = doc.to_dict()
+                print("Configuration loaded from Firestore.")
+            else:
+                self.config = None
+                print("No configuration found in Firestore.")
+        except Exception as e:
+            print(f"Error loading config from Firestore: {e}")
+            self.config = None
+
+    async def save_config(self):
+        """Saves current configuration to Firestore."""
+        try:
+            await asyncio.to_thread(self.db_doc_ref.set, self.config)
+            print("Configuration saved to Firestore.")
+        except Exception as e:
+            print(f"Error saving config to Firestore: {e}")
+
+    # --- Utility Functions ---
+
+    def get_next_sunday_430am_gmt(self):
+        """Calculates the timestamp for the next Sunday at 4:30 AM UTC (GMT)."""
+        now = datetime.now(timezone.utc)
+        
+        # Calculate days until next Sunday (Sunday is weekday 6, Monday is 0)
+        days_to_sunday = (6 - now.weekday() + 7) % 7
+        if days_to_sunday == 0:
+            # If it's already Sunday, check if 4:30 AM has passed
+            if now.hour > 4 or (now.hour == 4 and now.minute >= 30):
+                # Target time passed, schedule for next Sunday
+                days_to_sunday = 7
+        
+        # Calculate the next Sunday date
+        next_sunday = now + timedelta(days=days_to_sunday)
+        
+        # Set the time to 4:30 AM UTC
+        target_time = next_sunday.replace(hour=4, minute=30, second=0, microsecond=0, tzinfo=timezone.utc)
+        
+        # If the target time is in the past (only possible if days_to_sunday was 0), push to next week
+        if target_time <= now:
+            target_time += timedelta(weeks=1)
+            
+        return target_time.timestamp()
+
+    async def run_leaderboard_job(self, guild_id, target_channel_id, source_channel_id, role_id, top_count, is_test=False):
+        """
+        Core logic to fetch messages, calculate top users, assign roles, and send the message.
+        """
+        guild = self.get_guild(guild_id)
+        if not guild:
+            print(f"Error: Guild with ID {guild_id} not found.")
+            return
+
+        target_channel = guild.get_channel(target_channel_id)
+        source_channel = guild.get_channel(source_channel_id)
+        role = guild.get_role(role_id)
+
+        if not target_channel or not source_channel or not role:
+            error_message = f"Job failed: Missing resources. "
+            if not target_channel: error_message += "Target Channel not found. "
+            if not source_channel: error_message += "Source Channel not found. "
+            if not role: error_message += "Role not found. "
+            print(error_message)
+            if is_test and target_channel:
+                 await target_channel.send(f"❌ Leaderboard setup failed. Please check if the configured channels and role still exist. Details: {error_message}")
+            return
+
+        # 1. Calculate time range (Past 7 days)
+        seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        message_counts = collections.defaultdict(int)
+        
+        # 2. Fetch messages and count
+        
+        # Use target_channel for sending test message, but use source_channel for fetching messages
+        status_channel = target_channel if is_test else target_channel
+        
+        if is_test:
+            await status_channel.send(f"⏳ Starting leaderboard calculation from {source_channel.mention} for the past 7 days...")
+
+        try:
+            # Fetch history
+            async for message in source_channel.history(limit=None, after=seven_days_ago):
+                # Ignore messages from bots
+                if not message.author.bot:
+                    message_counts[message.author] += 1
+            
+            # Sort and get top users
+            sorted_users = sorted(message_counts.items(), key=lambda item: item[1], reverse=True)
+            top_members = sorted_users[:top_count]
+
+        except discord.errors.Forbidden:
+            error_msg = f"❌ Error: Bot does not have permissions to read history in {source_channel.mention}."
+            print(error_msg)
+            await status_channel.send(error_msg)
+            return
+        except Exception as e:
+            error_msg = f"❌ An unexpected error occurred during message fetching: {e}"
+            print(error_msg)
+            await status_channel.send(error_msg)
+            return
+
+        # 3. Role Management (Clear and Assign)
+        
+        # Get members who currently have the role
+        members_with_role = [member for member in guild.members if role in member.roles]
+
+        # Clear role from all current holders
+        for member in members_with_role:
+            try:
+                await member.remove_roles(role, reason="Weekly leaderboard role reset.")
+                # Small sleep to respect Discord rate limits
+                await asyncio.sleep(0.5) 
+            except discord.HTTPException as e:
+                print(f"Could not remove role from {member.display_name}: {e}")
+
+        # Assign role to top members
+        top_member_objects = []
+        for member_obj, _ in top_members:
+            # Get the full Member object, especially important if the user was just a User object from history
+            full_member = guild.get_member(member_obj.id)
+            if full_member:
+                top_member_objects.append(full_member)
+                try:
+                    await full_member.add_roles(role, reason="Weekly leaderboard top member award.")
+                    await asyncio.sleep(0.5)
+                except discord.HTTPException as e:
+                    print(f"Could not assign role to {full_member.display_name}: {e}")
+
+        # 4. Format and Send Leaderboard Message
+        
+        leaderboard_entries = []
+        emoji_map = {0: ":first_place:", 1: ":second_place:", 2: ":third_place:"}
+        
+        # Prepare the list of winners for the template
+        for i in range(top_count):
+            if i < len(top_members):
+                member, count = top_members[i]
+                
+                # Customize based on position, matching the user's requested template
+                if i == 0:
+                    award = "-# Gets 50k unb in cash"
+                elif i == 1:
+                    award = "-# Gets 25k unb in cash"
+                elif i == 2:
+                    award = "-# Gets 10k unb in cash"
+                else:
+                    award = f"-# Gets a consolation prize."
+
+                leaderboard_entries.append(
+                    f"{emoji_map.get(i, f'#{i+1}:')} {member.mention} with **{count}** messages.\n{award}"
+                )
+            else:
+                leaderboard_entries.append(f"#{i+1}: Not enough data/members this week.")
+                
+        leaderboard_text = "\n".join(leaderboard_entries)
+
+        # Assemble the final message
+        final_message = f"""
+Hello fellas, 
+We're back with the weekly leaderboard update!! <:Pika_Think:1444211873687011328>
+
+Here are the top {top_count} active members past week–
+{leaderboard_text}
+
+All of the top three members have been granted the role:
+**{role.name}**
+
+Top 1 can change their server nickname once. Top 1 & 2 can have a custom role with name and colour based on their requests. Contact <@1193415556402008169> (<@&1405157360045002785>) within 24 hours to claim your awards.
+        """
+        
+        # Send the final message
+        await target_channel.send(final_message)
+        
+        if is_test:
+            await target_channel.send("✅ Test run complete. Roles have been updated and the message was sent.")
+            
+        print(f"Leaderboard job executed successfully in Guild {guild.id}.")
+
+
+    # --- Background Task Scheduler ---
+
+    @tasks.loop(minutes=10) # Check every 10 minutes (or less, depending on desired precision)
+    async def leaderboard_scheduler(self):
+        await self.wait_until_ready()
+        
+        # Ensure config is loaded before proceeding
+        if self.config is None:
+             await self.load_config()
+             if self.config is None:
+                # Still no config, skip this check cycle
+                return 
+        
+        # Check for config existence
+        if not all(k in self.config for k in ["next_run_timestamp_gmt", "leaderboard_channel_id", "source_channel_id", "top_user_role_id", "top_users_count", "guild_id"]):
+            print("Scheduler waiting for full configuration via /setup-auto-leaderboard.")
+            return
+
+        next_run_ts = self.config['next_run_timestamp_gmt']
+        next_run_dt = datetime.fromtimestamp(next_run_ts, timezone.utc)
+        now = datetime.now(timezone.utc)
+        
+        if now >= next_run_dt:
+            print(f"Scheduled job running now: {now.isoformat()}. Target was: {next_run_dt.isoformat()}")
+            
+            # 1. Run the job
+            await self.run_leaderboard_job(
+                guild_id=self.config['guild_id'],
+                target_channel_id=self.config['leaderboard_channel_id'],
+                source_channel_id=self.config['source_channel_id'],
+                role_id=self.config['top_user_role_id'],
+                top_count=self.config['top_users_count'],
+                is_test=False
+            )
+            
+            # 2. Update the next run time and save
+            self.config['next_run_timestamp_gmt'] = self.get_next_sunday_430am_gmt()
+            await self.save_config()
+        else:
+            # Print status periodically for debugging
+            if now.minute % 60 == 0:
+                print(f"Next run scheduled at {next_run_dt.isoformat()}. Sleeping.")
+                
+
+    # --- Slash Commands ---
+    
+    @self.tree.command(name="setup-auto-leaderboard", description="Set up the automatic weekly message activity leaderboard.")
+    @app_commands.describe(
+        channel="The channel where the leaderboard message will be sent.",
+        role="The role to be cleared and reassigned to top members.",
+        top="The number of top users to fetch (e.g., 3).",
+        from_channel="The channel from which to count messages (the activity channel)."
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def setup_auto_leaderboard(self, interaction: discord.Interaction, channel: discord.TextChannel, role: discord.Role, top: app_commands.Range[int, 1, 10], from_channel: discord.TextChannel):
+        """Sets up the configuration and initial timer."""
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        
+        # 1. Calculate the initial next run time
+        next_run_ts = self.get_next_sunday_430am_gmt()
+        next_run_dt = datetime.fromtimestamp(next_run_ts, timezone.utc)
+
+        # 2. Store configuration
+        self.config = {
+            "guild_id": interaction.guild_id,
+            "leaderboard_channel_id": channel.id,
+            "top_user_role_id": role.id,
+            "top_users_count": top,
+            "source_channel_id": from_channel.id,
+            "next_run_timestamp_gmt": next_run_ts,
+        }
+        await self.save_config()
+
+        await interaction.followup.send(
+            f"✅ **Leaderboard setup complete!**\n"
+            f"• Leaderboard will be posted to: {channel.mention}\n"
+            f"• Message activity will be counted from: {from_channel.mention}\n"
+            f"• Top **{top}** members will receive the role: **{role.name}**.\n"
+            f"• Next run scheduled for: **{next_run_dt.strftime('%A, %Y-%m-%d at %H:%M UTC (GMT)')}**.",
+            ephemeral=True
+        )
+
+    @self.tree.command(name="test-leaderboard", description="Manually run the leaderboard job right now in this channel.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def test_leaderboard(self, interaction: discord.Interaction):
+        """Runs the job immediately using the stored configuration."""
+        await interaction.response.defer(thinking=True)
+        
+        if not self.config:
+            await self.load_config()
+
+        if not self.config or not self.config.get("leaderboard_channel_id"):
+            await interaction.followup.send("❌ Leaderboard setup is incomplete. Please run `/setup-auto-leaderboard` first.", ephemeral=True)
+            return
+
+        # Use the current interaction channel ID as the target channel ID for the test run
+        test_config = self.config.copy()
+        test_config['leaderboard_channel_id'] = interaction.channel_id
+        
+        await self.run_leaderboard_job(
+            guild_id=test_config['guild_id'],
+            target_channel_id=test_config['leaderboard_channel_id'],
+            source_channel_id=test_config['source_channel_id'],
+            role_id=test_config['top_user_role_id'],
+            top_count=test_config['top_users_count'],
+            is_test=True
+        )
+        
+        # Note: The response is handled inside run_leaderboard_job for better status updates
+        # But we send a quick final reply in case the job takes time
+        await interaction.followup.send("Test job initiated. Check the channel for results.", ephemeral=True)
+
+
+    @self.tree.command(name="timer-leaderboard", description="Shows the time remaining until the next automatic leaderboard update.")
+    async def timer_leaderboard(self, interaction: discord.Interaction):
+        """Calculates and displays the time remaining until the next run."""
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        
+        if not self.config:
+            await self.load_config()
+
+        if not self.config or not self.config.get("next_run_timestamp_gmt"):
+            await interaction.followup.send("❌ Leaderboard setup is incomplete. Please run `/setup-auto-leaderboard` first.", ephemeral=True)
+            return
+
+        next_run_ts = self.config['next_run_timestamp_gmt']
+        next_run_dt = datetime.fromtimestamp(next_run_ts, timezone.utc)
+        now = datetime.now(timezone.utc)
+        
+        if next_run_dt <= now:
+            await interaction.followup.send(
+                "⏳ The leaderboard job is currently overdue or running. It will be scheduled for the following Sunday (4:30 AM GMT) shortly after completion."
+            )
+            return
+
+        time_left: timedelta = next_run_dt - now
+        
+        days = time_left.days
+        hours = time_left.seconds // 3600
+        minutes = (time_left.seconds % 3600) // 60
+        seconds = time_left.seconds % 60
+        
+        countdown_msg = (
+            f"📅 **Time until next automatic leaderboard update:**\n"
+            f"It is scheduled for **{next_run_dt.strftime('%A, %Y-%m-%d at %H:%M UTC (GMT)')}**.\n"
+            f"Time remaining: `{days} days, {hours} hours, {minutes} minutes, {seconds} seconds`."
+        )
+
+        await interaction.followup.send(countdown_msg, ephemeral=True)
+
+
+# --- Execution ---
+
+# Note on run loop: tasks.loop is preferred over the simple on_ready loop 
+# as it handles exceptions and restarts more cleanly.
+from discord.ext import tasks
+bot = LeaderboardClient(intents=intents)
+
+# Run the bot (Token must be provided)
+if TOKEN and TOKEN != 'YOUR_BOT_TOKEN_HERE':
+    # This check prevents running with the placeholder token
+    bot.run(TOKEN)
 else:
-    # This is the line that confirms the load_dotenv() failed
-    print("FATAL DEBUG ERROR: DISCORD_TOKEN is None or empty after load_dotenv(). Check .env file.")
-    exit(1) # Exit immediately so we don't proceed to login failure
-# ----------------------------------------------------
-# DEBUGGING BLOCK END
-# ----------------------------------------------------
-
-CONFIG_FILE = 'leaderboard_data.json' # File to store persistent data
-
-# Timezone and Target Time Setup (IST - India Standard Time)
-IST_TZ = pytz.timezone("Asia/Kolkata") # Changed to use pytz
-UTC_TZ = pytz.utc                     # Defining UTC explicitly for clarity
-TARGET_HOUR = 10  # 10 AM
-TARGET_MINUTE = 0 # 0 minutes
-TARGET_DAY = 6    # Sunday (Monday is 0, Sunday is 6)
-
-# Initialize Bot with necessary intents
-# ... (rest of the script remains unchanged)
+    print("Bot execution skipped. Please provide a valid DISCORD_BOT_TOKEN.")
