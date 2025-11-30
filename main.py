@@ -113,24 +113,23 @@ class LeaderboardBot(commands.Bot):
     def _start_weekly_task_with_persistence(self):
         """
         Calculates the time until the first configured guild's next scheduled run 
-        and starts the task with that delay and the hourly interval.
-        
-        The hourly interval is now defined in the @tasks.loop decorator itself.
+        and starts the task with that delay. The interval is handled by the decorator.
         """
         if not self.leaderboard_config:
             if not self.weekly_leaderboard_task.is_running():
-                 # Use a short interval if no setup yet (will use 3600s interval from decorator)
+                 # Use a short initial delay if no setup yet
                  self.weekly_leaderboard_task.start(delay=60) 
             return
 
         # We base the initial delay calculation on the first configured guild
+        # Although the task is global, this ensures we set an appropriate initial delay.
         guild_id = next(iter(self.leaderboard_config))
         config = self.leaderboard_config[guild_id]
 
         target_dt_utc = config.get('next_run_dt')
 
+        # If time is missing or in the past, calculate the next Sunday 10 AM IST
         if not target_dt_utc or target_dt_utc < datetime.now(UTC_TZ):
-            # Recalculate if time is missing or in the past
             target_dt_utc = self.get_next_sunday_10am(datetime.now(UTC_TZ)) 
             config['next_run_dt'] = target_dt_utc
             self._save_config()
@@ -143,8 +142,7 @@ class LeaderboardBot(commands.Bot):
 
         print(f"Calculated initial delay: {initial_delay / 3600:.2f} hours")
 
-        # FIX: The interval (3600s) is defined in the decorator.
-        # We only pass the initial 'delay' here.
+        # Start or restart the task, passing only the initial 'delay'.
         if not self.weekly_leaderboard_task.is_running():
             self.weekly_leaderboard_task.start(delay=initial_delay)
         else:
@@ -255,11 +253,11 @@ class LeaderboardBot(commands.Bot):
 
         print(f"Leaderboard ran successfully. Next run saved as: {next_run.astimezone(IST_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
-        # 6. Restart the task with the *new* calculated delay to reset the timer
-        self._start_weekly_task_with_persistence() 
+        # 6. CRITICAL FIX: Removed the call to self._start_weekly_task_with_persistence() here.
+        # The hourly loop will naturally pick up the new 'next_run_dt' on its next cycle.
         return True
 
-    # FIX 1: Set the interval (3600 seconds/1 hour) directly in the decorator.
+    # Set the interval (3600 seconds/1 hour) directly in the decorator.
     @tasks.loop(seconds=3600) 
     async def weekly_leaderboard_task(self):
         """The scheduled task that executes the leaderboard logic based on stored next run time."""
@@ -276,6 +274,7 @@ class LeaderboardBot(commands.Bot):
             # Check if the current time is past the target time 
             if target_dt_utc and now_utc >= target_dt_utc:
                 print(f"Scheduled run triggered for guild {guild_id}.")
+                # If the run succeeds, it updates config['next_run_dt'] for the next week
                 await self._run_leaderboard_logic(guild_id, config)
 
     @weekly_leaderboard_task.before_loop
@@ -338,6 +337,7 @@ async def setup_auto_leaderboard(
     bot._save_config()
 
     # 4. Restart the task with the calculated delay to ensure the timer starts now
+    # If the task is already running (from setup_hook), this restarts the delay.
     bot._start_weekly_task_with_persistence()
 
     # 5. Confirmation
@@ -364,6 +364,7 @@ async def test_leaderboard(interaction: discord.Interaction):
     config = bot.leaderboard_config[guild_id]
 
     # Run the core logic, which updates the next run time and saves the config
+    # The fix ensures that _run_leaderboard_logic no longer restarts the task loop.
     success = await bot._run_leaderboard_logic(guild_id, config, interaction)
 
     if success:
@@ -371,7 +372,7 @@ async def test_leaderboard(interaction: discord.Interaction):
         next_run_dt_utc = config['next_run_dt']
         await interaction.followup.send(
             f"✅ Test run complete. Leaderboard sent to {channel.mention} and roles managed.\n"
-            f"The next run is now scheduled for the following Sunday at 10:00 AM IST: {discord.utils.format_dt(next_run_dt_utc, 'F')}.", 
+            f"The next *scheduled* run is now set for: {discord.utils.format_dt(next_run_dt_utc, 'F')}.", 
             ephemeral=True
         )
     else:
