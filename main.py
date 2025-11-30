@@ -112,8 +112,8 @@ class LeaderboardBot(commands.Bot):
 
     def _start_weekly_task_with_persistence(self):
         """
-        Calculates the time until the first configured guild's next scheduled run 
-        and starts the task with that delay. The interval is handled by the decorator.
+        Calculates the time until the first configured guild's next scheduled run,
+        and cleanly stops/starts the task with that delay.
         """
         if not self.leaderboard_config:
             if not self.weekly_leaderboard_task.is_running():
@@ -122,7 +122,6 @@ class LeaderboardBot(commands.Bot):
             return
 
         # We base the initial delay calculation on the first configured guild
-        # Although the task is global, this ensures we set an appropriate initial delay.
         guild_id = next(iter(self.leaderboard_config))
         config = self.leaderboard_config[guild_id]
 
@@ -142,11 +141,17 @@ class LeaderboardBot(commands.Bot):
 
         print(f"Calculated initial delay: {initial_delay / 3600:.2f} hours")
 
-        # Start or restart the task, passing only the initial 'delay'.
-        if not self.weekly_leaderboard_task.is_running():
-            self.weekly_leaderboard_task.start(delay=initial_delay)
-        else:
-            self.weekly_leaderboard_task.restart(delay=initial_delay)
+        # CRITICAL FIX: Stop the task cleanly if it's running, and then always call start().
+        # This prevents the "unexpected keyword argument 'delay'" error upon restart/re-execution.
+        if self.weekly_leaderboard_task.is_running():
+            self.weekly_leaderboard_task.stop()
+            print("Weekly leaderboard task stopped for clean restart.")
+            
+        # Start the task with the calculated delay. The interval (3600s) is in the decorator.
+        # We also need a brief sleep to allow the stop event to fully process before starting a new thread.
+        # Although technically synchronous, asyncio.sleep(0) often helps scheduling robustness, 
+        # but since this is called from sync context, we rely on the next event loop tick.
+        self.weekly_leaderboard_task.start(delay=initial_delay)
 
 
     async def on_ready(self):
@@ -253,8 +258,7 @@ class LeaderboardBot(commands.Bot):
 
         print(f"Leaderboard ran successfully. Next run saved as: {next_run.astimezone(IST_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
-        # 6. CRITICAL FIX: Removed the call to self._start_weekly_task_with_persistence() here.
-        # The hourly loop will naturally pick up the new 'next_run_dt' on its next cycle.
+        # Note: No need to restart the task here. The hourly loop handles the next check.
         return True
 
     # Set the interval (3600 seconds/1 hour) directly in the decorator.
@@ -337,7 +341,6 @@ async def setup_auto_leaderboard(
     bot._save_config()
 
     # 4. Restart the task with the calculated delay to ensure the timer starts now
-    # If the task is already running (from setup_hook), this restarts the delay.
     bot._start_weekly_task_with_persistence()
 
     # 5. Confirmation
@@ -364,7 +367,6 @@ async def test_leaderboard(interaction: discord.Interaction):
     config = bot.leaderboard_config[guild_id]
 
     # Run the core logic, which updates the next run time and saves the config
-    # The fix ensures that _run_leaderboard_logic no longer restarts the task loop.
     success = await bot._run_leaderboard_logic(guild_id, config, interaction)
 
     if success:
