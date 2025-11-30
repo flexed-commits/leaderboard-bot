@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands, Intents, Client
-from discord.ext import tasks # <--- FIX: Added the necessary import for tasks
+from discord.ext import tasks 
 from datetime import datetime, timedelta, timezone
 import asyncio
 import os
@@ -307,7 +307,8 @@ Top 1 can change their server nickname once. Top 1 & 2 can have a custom role wi
 
     # --- Slash Commands ---
     
-    @self.tree.command(name="setup-auto-leaderboard", description="Set up the automatic weekly message activity leaderboard.")
+    # FIX: Changed @self.tree.command to @app_commands.command
+    @app_commands.command(name="setup-auto-leaderboard", description="Set up the automatic weekly message activity leaderboard.")
     @app_commands.describe(
         channel="The channel where the leaderboard message will be sent.",
         role="The role to be cleared and reassigned to top members.",
@@ -343,7 +344,8 @@ Top 1 can change their server nickname once. Top 1 & 2 can have a custom role wi
             ephemeral=True
         )
 
-    @self.tree.command(name="test-leaderboard", description="Manually run the leaderboard job right now in this channel.")
+    # FIX: Changed @self.tree.command to @app_commands.command
+    @app_commands.command(name="test-leaderboard", description="Manually run the leaderboard job right now in this channel.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def test_leaderboard(self, interaction: discord.Interaction):
         """Runs the job immediately using the stored configuration."""
@@ -374,7 +376,8 @@ Top 1 can change their server nickname once. Top 1 & 2 can have a custom role wi
         await interaction.followup.send("Test job initiated. Check the channel for results.", ephemeral=True)
 
 
-    @self.tree.command(name="timer-leaderboard", description="Shows the time remaining until the next automatic leaderboard update.")
+    # FIX: Changed @self.tree.command to @app_commands.command
+    @app_commands.command(name="timer-leaderboard", description="Shows the time remaining until the next automatic leaderboard update.")
     async def timer_leaderboard(self, interaction: discord.Interaction):
         """Calculates and displays the time remaining until the next run."""
         await interaction.response.defer(thinking=True, ephemeral=True)
