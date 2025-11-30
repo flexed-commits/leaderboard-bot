@@ -1,5 +1,6 @@
 import discord
 from discord import app_commands, Intents, Client
+from discord.ext import tasks # <--- FIX: Added the necessary import for tasks
 from datetime import datetime, timedelta, timezone
 import asyncio
 import os
@@ -17,16 +18,9 @@ try:
     
     # Placeholder for credentials/app ID that would be provided by the environment
     # We assume the Firebase Admin SDK is initialized elsewhere or configured correctly
-    # for security rules access, as direct use of __firebase_config (JS object)
-    # is not standard for Python backend bots.
     
     # Initialize App (if not already initialized)
     if not firebase_admin._apps:
-        # Assuming a default service account or environment config is present
-        # Replace with your actual initialization if running locally:
-        # cred = credentials.Certificate('path/to/your/serviceAccountKey.json')
-        # firebase_admin.initialize_app(cred)
-        # For demonstration purposes, we'll try default init if possible:
         try:
             firebase_admin.initialize_app()
         except Exception as e:
@@ -37,7 +31,6 @@ try:
     db = firestore.client()
     
     # Use a dummy app ID if not provided by the environment
-    # This ensures we follow the required public data path structure
     APP_ID = os.environ.get('APP_ID', 'default-bot-app-id') 
     
     # Firestore path for configuration following security rules: 
@@ -66,14 +59,11 @@ if TOKEN == 'YOUR_BOT_TOKEN_HERE':
     print("WARNING: Please set the DISCORD_BOT_TOKEN environment variable or replace 'YOUR_BOT_TOKEN_HERE' with your actual bot token.")
 
 # Intents required:
-# - messages: For reading messages in the source channel.
-# - guilds: For guild operations (roles, members).
-# - members: MANDATORY for role assignment and reading all member data. Must be enabled in Discord Developer Portal.
 intents = Intents.default()
 intents.messages = True
-intents.message_content = True # Required for reading message content/activity
+intents.message_content = True 
 intents.guilds = True
-intents.members = True # Ensure this is enabled in the Discord Developer Portal
+intents.members = True 
 
 class LeaderboardClient(Client):
     def __init__(self, *, intents: Intents):
@@ -86,7 +76,8 @@ class LeaderboardClient(Client):
         await self.tree.sync()
         print(f'Logged in as {self.user} (ID: {self.user.id})')
         await self.load_config()
-        self.leaderboard_scheduler.start()
+        # Start the background task after loading the config
+        self.leaderboard_scheduler.start() 
 
     async def load_config(self):
         """Loads configuration from Firestore."""
@@ -165,7 +156,6 @@ class LeaderboardClient(Client):
         
         # 2. Fetch messages and count
         
-        # Use target_channel for sending test message, but use source_channel for fetching messages
         status_channel = target_channel if is_test else target_channel
         
         if is_test:
@@ -424,14 +414,10 @@ Top 1 can change their server nickname once. Top 1 & 2 can have a custom role wi
 
 # --- Execution ---
 
-# Note on run loop: tasks.loop is preferred over the simple on_ready loop 
-# as it handles exceptions and restarts more cleanly.
-from discord.ext import tasks
 bot = LeaderboardClient(intents=intents)
 
 # Run the bot (Token must be provided)
 if TOKEN and TOKEN != 'YOUR_BOT_TOKEN_HERE':
-    # This check prevents running with the placeholder token
     bot.run(TOKEN)
 else:
     print("Bot execution skipped. Please provide a valid DISCORD_BOT_TOKEN.")
