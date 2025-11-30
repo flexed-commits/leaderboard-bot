@@ -4,7 +4,7 @@ from discord.ext import tasks
 from datetime import datetime, timedelta, timezone
 import asyncio
 import os
-import json # Used for local file persistence
+import json 
 import collections
 from typing import Optional
 
@@ -21,10 +21,13 @@ if TOKEN == 'YOUR_BOT_TOKEN_HERE':
 
 # Intents required:
 intents = Intents.default()
+# Required for fetching messages in channels
 intents.messages = True
 intents.message_content = True 
+# Required for guild management and interaction
 intents.guilds = True
-intents.members = True # MANDATORY for role assignment
+# MANDATORY for role assignment and fetching guild members
+intents.members = True 
 
 class LeaderboardClient(Client):
     def __init__(self, *, intents: Intents):
@@ -33,7 +36,19 @@ class LeaderboardClient(Client):
         self.config: Optional[dict] = None # Stores the loaded configuration
 
     async def on_ready(self):
-        await self.tree.sync()
+        # --- TEMPORARY SYNC FIX ---
+        # Forces the bot to immediately sync commands to your specific guild.
+        # This solves the issue of commands not appearing instantly.
+        # Once commands appear, you can remove these two lines:
+        try:
+             # Using the guild ID from the configuration (1349281907765936188)
+            guild_id_to_sync = discord.Object(id=1349281907765936188) 
+            await self.tree.sync(guild=guild_id_to_sync)
+            print("Successfully synced commands to the configured guild.")
+        except Exception as e:
+            print(f"Failed to sync commands to the specific guild: {e}")
+        # --- END TEMPORARY SYNC FIX ---
+
         print(f'Logged in as {self.user} (ID: {self.user.id})')
         await self.load_config()
         # Start the background task after loading the config
@@ -48,19 +63,23 @@ class LeaderboardClient(Client):
                     print(f"Configuration loaded from {CONFIG_FILE}.")
             else:
                 self.config = None
-                print(f"No configuration file found at {CONFIG_FILE}.")
+                print(f"No configuration file found at {CONFIG_FILE}. Please run /setup-auto-leaderboard or create it manually.")
+        except json.JSONDecodeError as e:
+            print(f"Error loading config from file: {e}. The file might be empty or corrupted. Delete it and run /setup-auto-leaderboard.")
+            self.config = None
         except Exception as e:
-            print(f"Error loading config from file: {e}")
+            print(f"General error loading config from file: {e}")
             self.config = None
 
     async def save_config(self):
         """Saves current configuration to local JSON file."""
         if self.config is None:
-            return # Don't save if config is empty
+            return 
 
         try:
             with open(CONFIG_FILE, 'w') as f:
-                json.dump(self.config, f, indent=4)
+                # Use asyncio.to_thread to move file I/O operations out of the main event loop
+                await asyncio.to_thread(json.dump, self.config, f, indent=4)
             print(f"Configuration saved to {CONFIG_FILE}.")
         except Exception as e:
             print(f"Error saving config to file: {e}")
@@ -97,7 +116,7 @@ class LeaderboardClient(Client):
         """
         guild = self.get_guild(guild_id)
         if not guild:
-            print(f"Error: Guild with ID {guild_id} not found. (Perhaps bot was removed from guild?)")
+            print(f"Error: Guild with ID {guild_id} not found.")
             return
 
         target_channel = guild.get_channel(target_channel_id)
@@ -118,16 +137,14 @@ class LeaderboardClient(Client):
         seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
         message_counts = collections.defaultdict(int)
         
-        # 2. Fetch messages and count
-        
-        status_channel = target_channel # The channel to send status/error updates
+        status_channel = target_channel
         
         if is_test:
             await status_channel.send(f"⏳ Starting leaderboard calculation from {source_channel.mention} for the past 7 days...")
 
+        # 2. Fetch messages and count
         try:
-            # Fetch history
-            # The limit=None argument fetches all messages since the 'after' date (7 days ago)
+            # Fetch history since seven days ago.
             async for message in source_channel.history(limit=None, after=seven_days_ago):
                 # Ignore messages from bots
                 if not message.author.bot:
@@ -138,7 +155,7 @@ class LeaderboardClient(Client):
             top_members = sorted_users[:top_count]
 
         except discord.errors.Forbidden:
-            error_msg = f"❌ Error: Bot does not have permissions to read history in {source_channel.mention}."
+            error_msg = f"❌ Error: Bot does not have permissions to read history in {source_channel.mention}. Check permissions!"
             print(error_msg)
             await status_channel.send(error_msg)
             return
@@ -157,18 +174,15 @@ class LeaderboardClient(Client):
         for member in members_with_role:
             try:
                 await member.remove_roles(role, reason="Weekly leaderboard role reset.")
-                # Small sleep to respect Discord rate limits
                 await asyncio.sleep(0.5) 
             except discord.HTTPException as e:
                 print(f"Could not remove role from {member.display_name}: {e}")
 
         # Assign role to top members
-        top_member_objects = []
         for member_obj, _ in top_members:
             # Get the full Member object
             full_member = guild.get_member(member_obj.id)
             if full_member:
-                top_member_objects.append(full_member)
                 try:
                     await full_member.add_roles(role, reason="Weekly leaderboard top member award.")
                     await asyncio.sleep(0.5)
@@ -180,12 +194,12 @@ class LeaderboardClient(Client):
         leaderboard_entries = []
         emoji_map = {0: ":first_place:", 1: ":second_place:", 2: ":third_place:"}
         
-        # Prepare the list of winners for the template
         for i in range(top_count):
             if i < len(top_members):
                 member, count = top_members[i]
                 
-                # Customize based on position, matching the user's requested template
+                # Assign awards based on position (only up to top 3 are specified)
+                award = ""
                 if i == 0:
                     award = "-# Gets 50k unb in cash"
                 elif i == 1:
@@ -193,14 +207,15 @@ class LeaderboardClient(Client):
                 elif i == 2:
                     award = "-# Gets 10k unb in cash"
                 else:
-                    award = f"-# Gets a consolation prize."
+                    award = f"-# Congrats on reaching rank {i+1}!"
 
                 # Use member.mention and the count of messages
                 leaderboard_entries.append(
-                    f"{emoji_map.get(i, f'#{i+1}:')} {member.mention} with **{count}** messages.\n{award}"
+                    f"{emoji_map.get(i, f'#{i+1}:')} {member.mention} with more than **{count}** messages. \n{award}"
                 )
             else:
-                leaderboard_entries.append(f"#{i+1}: Not enough data/members this week.")
+                # If there aren't enough members to fill the top spots
+                leaderboard_entries.append(f"#{i+1}: No eligible member found or insufficient data.")
                 
         leaderboard_text = "\n".join(leaderboard_entries)
 
@@ -212,7 +227,7 @@ We're back with the weekly leaderboard update!! <:Pika_Think:1444211873687011328
 Here are the top {top_count} active members past week–
 {leaderboard_text}
 
-All of the top members have been granted the role:
+All of the top three members have been granted the role:
 **{role.name}**
 
 Top 1 can change their server nickname once. Top 1 & 2 can have a custom role with name and colour based on their requests. Contact <@1193415556402008169> (<@&1405157360045002785>) within 24 hours to claim your awards.
@@ -227,7 +242,7 @@ Top 1 can change their server nickname once. Top 1 & 2 can have a custom role wi
         print(f"Leaderboard job executed successfully in Guild {guild.id}.")
 
 
-    # --- Background Task Scheduler ---
+    # --- Background Task Scheduler (The restart-proof timer) ---
 
     @tasks.loop(minutes=10) # Check every 10 minutes (or less, depending on desired precision)
     async def leaderboard_scheduler(self):
@@ -248,7 +263,6 @@ Top 1 can change their server nickname once. Top 1 & 2 can have a custom role wi
 
         # 3. Check timer
         next_run_ts = self.config['next_run_timestamp_gmt']
-        # Convert the stored timestamp back to a datetime object in UTC
         next_run_dt = datetime.fromtimestamp(next_run_ts, timezone.utc)
         now = datetime.now(timezone.utc)
         
@@ -335,7 +349,8 @@ Top 1 can change their server nickname once. Top 1 & 2 can have a custom role wi
             is_test=True
         )
         
-        await interaction.followup.send("Test job initiated. Check the channel for results.", ephemeral=True)
+        # The final confirmation is sent inside run_leaderboard_job
+        await interaction.followup.send("Test job initiated. Check the channel for the results.", ephemeral=True)
 
 
     @app_commands.command(name="timer-leaderboard", description="Shows the time remaining until the next automatic leaderboard update.")
