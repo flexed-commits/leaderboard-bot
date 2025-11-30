@@ -4,52 +4,13 @@ from discord.ext import tasks
 from datetime import datetime, timedelta, timezone
 import asyncio
 import os
+import json # Used for local file persistence
 import collections
+from typing import Optional
 
-# --- Firestore Setup (using firebase_admin) ---
-# NOTE: In a real-world Python deployment, you MUST initialize the Firebase Admin SDK
-# with service account credentials (e.g., using firebase_admin.credentials.Certificate).
-# For this execution environment, we will mock the initialization.
-# In a true deployment, ensure 'firebase_admin' is installed and configured.
-
-try:
-    import firebase_admin
-    from firebase_admin import firestore, credentials
-    
-    # Placeholder for credentials/app ID that would be provided by the environment
-    # We assume the Firebase Admin SDK is initialized elsewhere or configured correctly
-    
-    # Initialize App (if not already initialized)
-    if not firebase_admin._apps:
-        try:
-            firebase_admin.initialize_app()
-        except Exception as e:
-            # Fallback if auto-init fails (common in constrained envs)
-            print(f"Firebase auto-init failed. Please ensure credentials are set up. Error: {e}")
-            pass
-
-    db = firestore.client()
-    
-    # Use a dummy app ID if not provided by the environment
-    APP_ID = os.environ.get('APP_ID', 'default-bot-app-id') 
-    
-    # Firestore path for configuration following security rules: 
-    # /artifacts/{appId}/public/data/leaderboard_config/settings
-    CONFIG_REF_PATH = f'artifacts/{APP_ID}/public/data/leaderboard_config'
-    CONFIG_DOC_ID = 'settings'
-
-except ImportError:
-    print("Warning: firebase_admin not installed. Persistence will be disabled.")
-    # Create a dummy object to prevent runtime errors if persistence is unavailable
-    class MockFirestore:
-        def get(self): return collections.defaultdict(lambda: None)
-        def set(self, data): pass
-    class MockDB:
-        def collection(self, path): return self
-        def document(self, doc_id): return MockFirestore()
-    db = MockDB()
-    CONFIG_REF_PATH = ''
-    CONFIG_DOC_ID = ''
+# --- Configuration for Persistence ---
+# File to store the bot's configuration (timers, channel IDs, role IDs)
+CONFIG_FILE = 'leaderboard_config.json'
 
 # --- Bot Setup ---
 
@@ -63,14 +24,13 @@ intents = Intents.default()
 intents.messages = True
 intents.message_content = True 
 intents.guilds = True
-intents.members = True 
+intents.members = True # MANDATORY for role assignment
 
 class LeaderboardClient(Client):
     def __init__(self, *, intents: Intents):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
-        self.config = None
-        self.db_doc_ref = db.collection(CONFIG_REF_PATH).document(CONFIG_DOC_ID)
+        self.config: Optional[dict] = None # Stores the loaded configuration
 
     async def on_ready(self):
         await self.tree.sync()
@@ -80,26 +40,30 @@ class LeaderboardClient(Client):
         self.leaderboard_scheduler.start() 
 
     async def load_config(self):
-        """Loads configuration from Firestore."""
+        """Loads configuration from local JSON file."""
         try:
-            doc = await asyncio.to_thread(self.db_doc_ref.get)
-            if doc.exists:
-                self.config = doc.to_dict()
-                print("Configuration loaded from Firestore.")
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, 'r') as f:
+                    self.config = json.load(f)
+                    print(f"Configuration loaded from {CONFIG_FILE}.")
             else:
                 self.config = None
-                print("No configuration found in Firestore.")
+                print(f"No configuration file found at {CONFIG_FILE}.")
         except Exception as e:
-            print(f"Error loading config from Firestore: {e}")
+            print(f"Error loading config from file: {e}")
             self.config = None
 
     async def save_config(self):
-        """Saves current configuration to Firestore."""
+        """Saves current configuration to local JSON file."""
+        if self.config is None:
+            return # Don't save if config is empty
+
         try:
-            await asyncio.to_thread(self.db_doc_ref.set, self.config)
-            print("Configuration saved to Firestore.")
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(self.config, f, indent=4)
+            print(f"Configuration saved to {CONFIG_FILE}.")
         except Exception as e:
-            print(f"Error saving config to Firestore: {e}")
+            print(f"Error saving config to file: {e}")
 
     # --- Utility Functions ---
 
@@ -133,7 +97,7 @@ class LeaderboardClient(Client):
         """
         guild = self.get_guild(guild_id)
         if not guild:
-            print(f"Error: Guild with ID {guild_id} not found.")
+            print(f"Error: Guild with ID {guild_id} not found. (Perhaps bot was removed from guild?)")
             return
 
         target_channel = guild.get_channel(target_channel_id)
@@ -156,13 +120,14 @@ class LeaderboardClient(Client):
         
         # 2. Fetch messages and count
         
-        status_channel = target_channel if is_test else target_channel
+        status_channel = target_channel # The channel to send status/error updates
         
         if is_test:
             await status_channel.send(f"⏳ Starting leaderboard calculation from {source_channel.mention} for the past 7 days...")
 
         try:
             # Fetch history
+            # The limit=None argument fetches all messages since the 'after' date (7 days ago)
             async for message in source_channel.history(limit=None, after=seven_days_ago):
                 # Ignore messages from bots
                 if not message.author.bot:
@@ -200,7 +165,7 @@ class LeaderboardClient(Client):
         # Assign role to top members
         top_member_objects = []
         for member_obj, _ in top_members:
-            # Get the full Member object, especially important if the user was just a User object from history
+            # Get the full Member object
             full_member = guild.get_member(member_obj.id)
             if full_member:
                 top_member_objects.append(full_member)
@@ -230,6 +195,7 @@ class LeaderboardClient(Client):
                 else:
                     award = f"-# Gets a consolation prize."
 
+                # Use member.mention and the count of messages
                 leaderboard_entries.append(
                     f"{emoji_map.get(i, f'#{i+1}:')} {member.mention} with **{count}** messages.\n{award}"
                 )
@@ -246,7 +212,7 @@ We're back with the weekly leaderboard update!! <:Pika_Think:1444211873687011328
 Here are the top {top_count} active members past week–
 {leaderboard_text}
 
-All of the top three members have been granted the role:
+All of the top members have been granted the role:
 **{role.name}**
 
 Top 1 can change their server nickname once. Top 1 & 2 can have a custom role with name and colour based on their requests. Contact <@1193415556402008169> (<@&1405157360045002785>) within 24 hours to claim your awards.
@@ -267,26 +233,29 @@ Top 1 can change their server nickname once. Top 1 & 2 can have a custom role wi
     async def leaderboard_scheduler(self):
         await self.wait_until_ready()
         
-        # Ensure config is loaded before proceeding
+        # 1. Load config if not loaded (for persistence after restart)
         if self.config is None:
              await self.load_config()
              if self.config is None:
                 # Still no config, skip this check cycle
                 return 
         
-        # Check for config existence
-        if not all(k in self.config for k in ["next_run_timestamp_gmt", "leaderboard_channel_id", "source_channel_id", "top_user_role_id", "top_users_count", "guild_id"]):
+        # 2. Check for required configuration keys
+        required_keys = ["next_run_timestamp_gmt", "leaderboard_channel_id", "source_channel_id", "top_user_role_id", "top_users_count", "guild_id"]
+        if not all(k in self.config for k in required_keys):
             print("Scheduler waiting for full configuration via /setup-auto-leaderboard.")
             return
 
+        # 3. Check timer
         next_run_ts = self.config['next_run_timestamp_gmt']
+        # Convert the stored timestamp back to a datetime object in UTC
         next_run_dt = datetime.fromtimestamp(next_run_ts, timezone.utc)
         now = datetime.now(timezone.utc)
         
         if now >= next_run_dt:
             print(f"Scheduled job running now: {now.isoformat()}. Target was: {next_run_dt.isoformat()}")
             
-            # 1. Run the job
+            # Run the job
             await self.run_leaderboard_job(
                 guild_id=self.config['guild_id'],
                 target_channel_id=self.config['leaderboard_channel_id'],
@@ -296,18 +265,14 @@ Top 1 can change their server nickname once. Top 1 & 2 can have a custom role wi
                 is_test=False
             )
             
-            # 2. Update the next run time and save
+            # Update the next run time and save (ensures restart resilience)
             self.config['next_run_timestamp_gmt'] = self.get_next_sunday_430am_gmt()
             await self.save_config()
-        else:
-            # Print status periodically for debugging
-            if now.minute % 60 == 0:
-                print(f"Next run scheduled at {next_run_dt.isoformat()}. Sleeping.")
+        # else: bot is sleeping, timer is correct
                 
 
     # --- Slash Commands ---
     
-    # FIX: Changed @self.tree.command to @app_commands.command
     @app_commands.command(name="setup-auto-leaderboard", description="Set up the automatic weekly message activity leaderboard.")
     @app_commands.describe(
         channel="The channel where the leaderboard message will be sent.",
@@ -344,7 +309,6 @@ Top 1 can change their server nickname once. Top 1 & 2 can have a custom role wi
             ephemeral=True
         )
 
-    # FIX: Changed @self.tree.command to @app_commands.command
     @app_commands.command(name="test-leaderboard", description="Manually run the leaderboard job right now in this channel.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def test_leaderboard(self, interaction: discord.Interaction):
@@ -371,12 +335,9 @@ Top 1 can change their server nickname once. Top 1 & 2 can have a custom role wi
             is_test=True
         )
         
-        # Note: The response is handled inside run_leaderboard_job for better status updates
-        # But we send a quick final reply in case the job takes time
         await interaction.followup.send("Test job initiated. Check the channel for results.", ephemeral=True)
 
 
-    # FIX: Changed @self.tree.command to @app_commands.command
     @app_commands.command(name="timer-leaderboard", description="Shows the time remaining until the next automatic leaderboard update.")
     async def timer_leaderboard(self, interaction: discord.Interaction):
         """Calculates and displays the time remaining until the next run."""
