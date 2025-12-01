@@ -23,7 +23,7 @@
  */
 
 import { Client, GatewayIntentBits, Partials, Routes, REST, SlashCommandBuilder } from 'discord.js';
-import { setTimeout } from 'timers/promises';
+// Removed 'setTimeout' import from 'timers/promises' to use the global callback-based setTimeout
 
 // --- CONFIGURATION AND SIMULATED DATABASE ---
 let botConfig = {
@@ -116,6 +116,7 @@ function startScheduler(client) {
         clearTimeout(schedulerTimeout);
     }
 
+    // Using the global setTimeout which accepts a callback function and a number delay.
     schedulerTimeout = setTimeout(async () => {
         try {
             console.log('[SCHEDULER] Executing scheduled leaderboard update...');
