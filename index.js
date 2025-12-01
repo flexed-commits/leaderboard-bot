@@ -23,7 +23,7 @@
  */
 
 import { Client, GatewayIntentBits, Partials, Routes, REST, SlashCommandBuilder } from 'discord.js';
-// Removed 'setTimeout' import from 'timers/promises' to use the global callback-based setTimeout
+// We use the global callback-based setTimeout, not the promise-based one from 'timers/promises'
 
 // --- CONFIGURATION AND SIMULATED DATABASE ---
 let botConfig = {
@@ -39,6 +39,9 @@ let botConfig = {
 // Replace with your actual Bot Token and Client ID (use environment variables in production)
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || 'YOUR_BOT_TOKEN_HERE';
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || 'YOUR_CLIENT_ID_HERE';
+
+// Privileged User ID for shutdown command
+const OWNER_ID = '1403084314819825787';
 
 // Utility function to simulate saving the JSON config
 function setStorage(newConfig) {
@@ -331,6 +334,14 @@ const commands = [
         .setName('stats')
         .setDescription('Shows message statistics (total messages and top user) for the last 7 days.')
         .toJSON(),
+        
+    new SlashCommandBuilder()
+        .setName('shutdown')
+        .setDescription('Shuts down the bot (Owner only).')
+        // Using DefaultMemberPermissions(0) to ensure it appears in the menu, 
+        // but the internal ID check is the ultimate permission gate.
+        .setDefaultMemberPermissions(0) 
+        .toJSON(),
 ];
 
 async function registerCommands(client) {
@@ -509,6 +520,28 @@ Period: **${formatDate(sevenDaysAgo)}** to **${formatDate(today)}** (Last 7 days
             console.error('Error during /stats command:', error);
             await interaction.editReply({ content: `An error occurred while fetching stats: \`${error.message}\`` });
         }
+    }
+    
+    // --- 5. SHUTDOWN COMMAND (Owner Only) ---
+    else if (commandName === 'shutdown') {
+        if (interaction.user.id !== OWNER_ID) {
+            return interaction.reply({ content: '🚫 Permission denied. Only the designated owner can use this command.', ephemeral: true });
+        }
+
+        await interaction.reply({ content: '👋 Shutting down bot. Goodbye!', ephemeral: false });
+        
+        console.log(`[ADMIN] Shutdown initiated by user ID: ${interaction.user.id}`);
+        
+        // Clear the scheduler to prevent future runs
+        if (schedulerTimeout) {
+            clearTimeout(schedulerTimeout);
+            console.log('[SCHEDULER] Scheduler successfully cleared.');
+        }
+
+        // Destroy the client connection and exit the process
+        client.destroy();
+        // Since client.destroy() takes a moment, we exit the process to ensure immediate shutdown
+        process.exit(0); 
     }
 });
 
