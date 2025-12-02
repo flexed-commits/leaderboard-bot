@@ -273,9 +273,9 @@ Here are the top ${config.topUserCount} active members past week:
 -# Gets 10k unb in cash.
 
 All of the top three members have been granted the role:
-**<@&${activeUserRole}>**
+**<@&1376577805890093096>**
 
-Top 1 can change their server nickname once. Top 1 & 2 can have a custom role with name and colour based on their requests. Contact <@${flexed}> or <@${deathscyth}>(<@&${deathrole}>) within 24 hours to claim your awards.`;
+Top 1 can change their server nickname once. Top 1 & 2 can have a custom role with name and colour based on their requests. Contact <@!1081876265683927080> or <@!1193415556402008169>(<@&1405157360045002785>) within 24 hours to claim your awards.`;
 
         await leaderboardChannel.send(leaderboardText);
 
@@ -464,7 +464,7 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({
             content: `⏳ The next automated leaderboard update is scheduled for **${new Date(nextRunTimestamp).toUTCString()}**.
 (In **${days}** days, **${hours}** hours, **${minutes}** minutes, and **${seconds}** seconds).`,
-            ephemeral: true
+            ephemeral: false
         });
     }
     
