@@ -42,6 +42,10 @@ const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || 'YOUR_CLIENT_ID_HERE'
 
 // Privileged User ID for shutdown command
 const OWNER_ID = '1403084314819825787';
+const flexed = 1081876265683927080;
+const deathscyth = 1193415556402008169;
+const deathrole = 1405157360045002785;
+const activeUserRole = 1376577805890093096;
 
 // Utility function to simulate saving the JSON config
 function setStorage(newConfig) {
@@ -259,20 +263,19 @@ async function runLeaderboardUpdate(client, isTest = false, interaction = null) 
 
         // Custom rewards message generation
         const leaderboardText = `Hello fellas, 
-We're back with the weekly leaderboard update!! <a:Pika_Think:1444211873687011328>
-
-Here are the top ${config.topUserCount} active members past week–
+We're back with the weekly leaderboard update!! 
+Here are the top ${config.topUserCount} active members past week:
 :first_place: Top 1: ${top1}. 
--# Gets 50k unb in cash
+-# Gets 50k unb in cash.
 :second_place: Top 2: ${top2}.
--# Gets 25k unb in cash
+-# Gets 25k unb in cash.
 :third_place: Top 3: ${top3}.
--# Gets 10k unb in cash
+-# Gets 10k unb in cash.
 
 All of the top three members have been granted the role:
-**${roleName}**
+**<@&{activeUserRole}>**
 
-Top 1 can change their server nickname once. Top 1 & 2 can have a custom role with name and colour based on their requests. Contact <@1193415556402008169> (<@&1405157360045002785>) within 24 hours to claim your awards.`;
+Top 1 can change their server nickname once. Top 1 & 2 can have a custom role with name and colour based on their requests. Contact <@{flexed}> or <@{deathscyth}>(<@&{deathrole}>) within 24 hours to claim your awards.`;
 
         await leaderboardChannel.send(leaderboardText);
 
